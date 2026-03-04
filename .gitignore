@@ -1,0 +1,13 @@
+# Local environment — NEVER commit this file.
+# On Railway, set these values in the Variables dashboard instead.
+.env
+
+# SQLite sync state database (runtime artefact, not source code)
+sync_state.db
+
+# JSON fallback store (if better-sqlite3 is unavailable)
+sync_state.json
+
+# Node
+node_modules/
+npm-debug.log*

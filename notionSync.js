@@ -1,0 +1,222 @@
+'use strict';
+
+const { Client } = require('@notionhq/client');
+const store = require('./store');
+const { notionPageToTodoistTask, todoistTaskToNotionProps } = require('./fieldMap');
+const todoistSync = require('./todoistSync');
+
+const notion = new Client({ auth: process.env.NOTION_API_KEY });
+
+function dbId() {
+  return process.env.NOTION_DATABASE_ID;
+}
+
+// ---------------------------------------------------------------------------
+// Write helpers (Notion side)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a new Notion page in the configured database from a Todoist task.
+ *
+ * @param {object} task  Raw Todoist task object
+ * @returns {Promise<object>}  The created Notion page object
+ */
+async function createNotionPage(task) {
+  console.log(`[notionSync] Creating page for todoist task id=${task.id} "${task.content}"`);
+
+  const properties = todoistTaskToNotionProps(task, task.id);
+
+  const page = await notion.pages.create({
+    parent: { database_id: dbId() },
+    properties,
+  });
+
+  console.log(`[notionSync] Created page id=${page.id} for todoist_id=${task.id}`);
+
+  // Persist mapping; origin=todoist so the poll loop debounces it.
+  store.upsert(String(task.id), page.id, 'todoist');
+
+  return page;
+}
+
+/**
+ * Update an existing Notion page's properties from a Todoist task.
+ *
+ * @param {string} notionId
+ * @param {object} task  Raw Todoist task object
+ * @returns {Promise<object>}  The updated Notion page object
+ */
+async function updateNotionPage(notionId, task) {
+  console.log(`[notionSync] Updating page id=${notionId} from todoist_id=${task.id}`);
+
+  const properties = todoistTaskToNotionProps(task, task.id);
+
+  const page = await notion.pages.update({
+    page_id: notionId,
+    properties,
+  });
+
+  store.markSynced(notionId, 'todoist');
+  console.log(`[notionSync] Updated page id=${notionId}`);
+
+  return page;
+}
+
+/**
+ * Archive (soft-delete) a Notion page.
+ *
+ * @param {string} notionId
+ * @returns {Promise<object>}
+ */
+async function archiveNotionPage(notionId) {
+  console.log(`[notionSync] Archiving page id=${notionId}`);
+
+  const page = await notion.pages.update({
+    page_id: notionId,
+    archived: true,
+  });
+
+  store.markSynced(notionId, 'todoist');
+  console.log(`[notionSync] Archived page id=${notionId}`);
+
+  return page;
+}
+
+/**
+ * Mark a Notion page's Done checkbox as true.
+ *
+ * @param {string} notionId
+ * @returns {Promise<object>}
+ */
+async function markNotionDone(notionId) {
+  console.log(`[notionSync] Marking page done id=${notionId}`);
+
+  const page = await notion.pages.update({
+    page_id: notionId,
+    properties: {
+      Done: { checkbox: true },
+    },
+  });
+
+  store.markSynced(notionId, 'todoist');
+  console.log(`[notionSync] Marked done page id=${notionId}`);
+
+  return page;
+}
+
+// ---------------------------------------------------------------------------
+// Polling loop
+// ---------------------------------------------------------------------------
+
+/**
+ * Query Notion for pages modified since `lastPollTime`, then create or update
+ * the corresponding Todoist tasks.  Pages that were recently written by the
+ * Todoist webhook handler are skipped (debounce window).
+ *
+ * @param {string} lastPollTime  ISO 8601 timestamp
+ * @returns {Promise<string>}    ISO 8601 timestamp to use as the next lastPollTime
+ */
+async function pollNotion(lastPollTime) {
+  const pollStart = new Date().toISOString();
+  console.log(`[notionSync] Polling Notion for pages modified since ${lastPollTime}`);
+
+  let pages = [];
+
+  try {
+    // Notion filter: last_edited_time is an implicit filter via after
+    const response = await notion.databases.query({
+      database_id: dbId(),
+      filter: {
+        timestamp: 'last_edited_time',
+        last_edited_time: {
+          after: lastPollTime,
+        },
+      },
+      // Fetch up to 100 at a time; add cursor pagination if needed
+      page_size: 100,
+    });
+
+    pages = response.results;
+  } catch (err) {
+    console.error('[notionSync] Failed to query Notion database:', err.message);
+    return lastPollTime;
+  }
+
+  console.log(`[notionSync] Found ${pages.length} changed page(s)`);
+
+  for (const page of pages) {
+    const notionId = page.id;
+
+    // Skip pages that were last written by our Todoist webhook handler within
+    // the debounce window to prevent echo loops.
+    if (store.isDebounced(notionId)) {
+      console.log(`[notionSync] Skipping debounced page id=${notionId}`);
+      continue;
+    }
+
+    let fields;
+    try {
+      fields = notionPageToTodoistTask(page);
+    } catch (err) {
+      console.error(`[notionSync] Failed to map page id=${notionId}:`, err.message);
+      continue;
+    }
+
+    const existing = store.getByNotionId(notionId);
+
+    try {
+      if (!existing) {
+        // New page — create a matching Todoist task
+        const task = await todoistSync.createTodoistTask(fields, notionId);
+
+        // Write the Todoist ID back into the Notion page so future lookups work
+        await notion.pages.update({
+          page_id: notionId,
+          properties: {
+            TodoistID: {
+              rich_text: [
+                { type: 'text', text: { content: String(task.id) } },
+              ],
+            },
+          },
+        });
+
+        // Stamp debounce so the next poll doesn't re-process this page
+        store.upsert(String(task.id), notionId, 'notion');
+        console.log(
+          `[notionSync] Created todoist task id=${task.id} for notion page id=${notionId}`
+        );
+      } else {
+        const todoistId = existing.todoist_id;
+
+        if (fields.is_done) {
+          // Page marked done — close the Todoist task
+          await todoistSync.closeTodoistTask(todoistId);
+          store.markSynced(notionId, 'notion');
+          console.log(
+            `[notionSync] Closed todoist task id=${todoistId} (Notion page marked done)`
+          );
+        } else {
+          // Regular update
+          await todoistSync.updateTodoistTask(todoistId, fields, notionId);
+          store.markSynced(notionId, 'notion');
+        }
+      }
+    } catch (err) {
+      console.error(
+        `[notionSync] Failed to sync page id=${notionId}:`,
+        err.response?.data ?? err.message
+      );
+    }
+  }
+
+  return pollStart;
+}
+
+module.exports = {
+  createNotionPage,
+  updateNotionPage,
+  archiveNotionPage,
+  markNotionDone,
+  pollNotion,
+};

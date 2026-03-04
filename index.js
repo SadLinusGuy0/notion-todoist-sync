@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const cron = require('node-cron');
 const store = require('./store');
 const notionSync = require('./notionSync');
+const projectCache = require('./projectCache');
 
 // ---------------------------------------------------------------------------
 // Environment validation
@@ -119,12 +120,24 @@ app.post('/webhook/todoist', async (req, res) => {
 });
 
 /**
- * Dispatch a Todoist webhook event to the appropriate sync action.
- *
- * @param {string} eventName
- * @param {object} task  The event_data payload from Todoist
+ * Top-level dispatcher — routes each Todoist webhook event to the correct
+ * handler based on its event name prefix.
  */
-async function handleTodoistEvent(eventName, task) {
+async function handleTodoistEvent(eventName, eventData) {
+  if (eventName.startsWith('project:')) {
+    return handleProjectEvent(eventName, eventData);
+  }
+  if (eventName.startsWith('label:')) {
+    return handleLabelEvent(eventName, eventData);
+  }
+  return handleItemEvent(eventName, eventData);
+}
+
+// ---------------------------------------------------------------------------
+// Item event handler
+// ---------------------------------------------------------------------------
+
+async function handleItemEvent(eventName, task) {
   if (!task || !task.id) {
     console.warn(`[webhook] event_data missing or has no id for event: ${eventName}`);
     return;
@@ -132,8 +145,7 @@ async function handleTodoistEvent(eventName, task) {
 
   const todoistId = String(task.id);
 
-  // If this task ID was last written by our own Notion→Todoist sync and is
-  // still within the debounce window, skip it to prevent an echo loop.
+  // Skip events triggered by our own Notion→Todoist writes (echo prevention).
   const existing = store.getByTodoistId(todoistId);
   if (existing && existing.origin === 'notion' && store.isDebounced(todoistId)) {
     console.log(
@@ -153,15 +165,12 @@ async function handleTodoistEvent(eventName, task) {
       case 'item:updated': {
         const record = store.getByTodoistId(todoistId);
         if (!record) {
-          // We haven't seen this task before — treat it like a new task
           console.log(
-            `[webhook] item:updated but no mapping found — creating Notion page for task id=${todoistId}`
+            `[webhook] item:updated — no mapping found, creating Notion page for task id=${todoistId}`
           );
           await notionSync.createNotionPage(task);
         } else {
-          console.log(
-            `[webhook] item:updated → updating Notion page id=${record.notion_id}`
-          );
+          console.log(`[webhook] item:updated → updating Notion page id=${record.notion_id}`);
           await notionSync.updateNotionPage(record.notion_id, task);
         }
         break;
@@ -170,54 +179,124 @@ async function handleTodoistEvent(eventName, task) {
       case 'item:completed': {
         const record = store.getByTodoistId(todoistId);
         if (!record) {
-          console.warn(
-            `[webhook] item:completed but no Notion page mapping found for task id=${todoistId}`
-          );
+          console.warn(`[webhook] item:completed — no Notion mapping for task id=${todoistId}`);
           return;
         }
-
-        // Recurring tasks are never truly "done" — completing one occurrence
-        // advances the due date to the next.  Todoist will fire item:updated
-        // immediately after with the new due date, which will update Notion.
-        // Marking the page done here would incorrectly close it.
+        // Recurring tasks: completing one occurrence advances the due date.
+        // item:updated fires immediately after with the new date — let that
+        // handle Notion; don't mark the page done here.
         if (task.due?.is_recurring) {
           console.log(
-            `[webhook] item:completed for recurring task id=${todoistId} — ` +
-              'skipping done mark; item:updated will follow with the next due date'
+            `[webhook] item:completed (recurring) id=${todoistId} — ` +
+              'skipping done mark; item:updated will follow with new due date'
           );
           break;
         }
-
-        console.log(
-          `[webhook] item:completed → marking Notion page done id=${record.notion_id}`
-        );
+        console.log(`[webhook] item:completed → marking Notion page done id=${record.notion_id}`);
         await notionSync.markNotionDone(record.notion_id);
+        break;
+      }
+
+      case 'item:uncompleted': {
+        const record = store.getByTodoistId(todoistId);
+        if (!record) {
+          // Task existed before sync started — create a fresh Notion page.
+          console.log(
+            `[webhook] item:uncompleted — no mapping found, creating Notion page for task id=${todoistId}`
+          );
+          await notionSync.createNotionPage(task);
+        } else {
+          console.log(
+            `[webhook] item:uncompleted → updating Notion page id=${record.notion_id} (Done=false)`
+          );
+          await notionSync.updateNotionPage(record.notion_id, task);
+        }
         break;
       }
 
       case 'item:deleted': {
         const record = store.getByTodoistId(todoistId);
         if (!record) {
-          console.warn(
-            `[webhook] item:deleted but no Notion page mapping found for task id=${todoistId}`
-          );
+          console.warn(`[webhook] item:deleted — no Notion mapping for task id=${todoistId}`);
           return;
         }
-        console.log(
-          `[webhook] item:deleted → archiving Notion page id=${record.notion_id}`
-        );
+        console.log(`[webhook] item:deleted → archiving Notion page id=${record.notion_id}`);
         await notionSync.archiveNotionPage(record.notion_id);
         break;
       }
 
       default:
-        console.log(`[webhook] Unhandled event type: ${eventName} — ignoring`);
+        console.log(`[webhook] Unhandled item event: ${eventName}`);
     }
   } catch (err) {
     console.error(
       `[webhook] Error handling ${eventName} for task id=${todoistId}:`,
       err.response?.data ?? err.message
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Project event handler
+// ---------------------------------------------------------------------------
+
+async function handleProjectEvent(eventName, project) {
+  console.log(`[webhook] ${eventName} id=${project?.id} "${project?.name ?? ''}"`);
+
+  switch (eventName) {
+    case 'project:added':
+    case 'project:updated': {
+      // Refresh the cache so subsequent task syncs use the new/renamed name.
+      await projectCache.refreshCache();
+      console.log(`[webhook] ${eventName} — project cache refreshed`);
+      break;
+    }
+
+    case 'project:deleted':
+    case 'project:archived': {
+      // Tasks in a deleted/archived project will arrive as item:deleted events.
+      // Just keep the cache fresh so stale names don't linger.
+      await projectCache.refreshCache();
+      console.log(`[webhook] ${eventName} — project cache refreshed`);
+      break;
+    }
+
+    default:
+      console.log(`[webhook] Unhandled project event: ${eventName}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Label event handler
+// ---------------------------------------------------------------------------
+
+async function handleLabelEvent(eventName, label) {
+  console.log(`[webhook] ${eventName} id=${label?.id} "${label?.name ?? ''}"`);
+
+  switch (eventName) {
+    case 'label:added': {
+      // New label — no pages to update yet.  Tasks that get this label will
+      // arrive via item:updated and the Labels multi-select will be set then.
+      console.log(`[webhook] label:added — no immediate action needed`);
+      break;
+    }
+
+    case 'label:updated':
+    case 'label:deleted': {
+      // A renamed or deleted label may already appear on synced Notion pages.
+      // Force a full Todoist resync on the next cron tick: all tasks will be
+      // re-fetched and their Labels multi-selects updated in Notion.
+      todoistSyncToken = '*';
+      store.setTodoistSyncToken('*');
+      console.log(
+        `[webhook] ${eventName} — Todoist sync token reset; ` +
+          'all tasks will be re-synced to Notion on the next cron cycle'
+      );
+      break;
+    }
+
+    default:
+      console.log(`[webhook] Unhandled label event: ${eventName}`);
   }
 }
 

@@ -87,7 +87,15 @@ Todoist webhooks must be registered via the [Todoist developer console](https://
 - `item:added`
 - `item:updated`
 - `item:completed`
+- `item:uncompleted`
 - `item:deleted`
+- `project:added`
+- `project:updated`
+- `project:deleted`
+- `project:archived`
+- `label:added`
+- `label:updated`
+- `label:deleted`
 
 **Webhook URL:** `https://<your-public-domain>/webhook/todoist`
 

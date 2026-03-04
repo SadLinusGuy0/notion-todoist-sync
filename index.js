@@ -232,6 +232,85 @@ cron.schedule('*/1 * * * *', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// One-time import endpoints
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /import/todoist
+ * Fetches every active task from Todoist and creates a Notion page for any
+ * task that is not already mapped in the sync store.  Safe to call multiple
+ * times — already-mapped tasks are skipped.
+ */
+app.post('/import/todoist', (req, res) => {
+  res.json({
+    status: 'started',
+    message: 'Todoist → Notion import running in background — watch logs for progress.',
+  });
+  setImmediate(importFromTodoist);
+});
+
+async function importFromTodoist() {
+  console.log('[import] Starting Todoist → Notion bulk import...');
+  let tasks;
+  try {
+    const axios = require('axios');
+    const response = await axios.get('https://api.todoist.com/rest/v2/tasks', {
+      headers: { Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}` },
+    });
+    tasks = response.data;
+  } catch (err) {
+    console.error(
+      `[import] Could not fetch tasks from Todoist: HTTP ${err.response?.status ?? err.message}. ` +
+        'If you see 410, the Todoist REST v2 GET /tasks endpoint may be unavailable for your ' +
+        'account — use the Notion → Todoist import instead and let Notion be the source of truth.'
+    );
+    return;
+  }
+
+  console.log(`[import] Fetched ${tasks.length} active Todoist task(s)`);
+  let created = 0;
+  let skipped = 0;
+
+  for (const task of tasks) {
+    const existing = store.getByTodoistId(String(task.id));
+    if (existing) {
+      skipped++;
+      continue;
+    }
+    try {
+      await notionSync.createNotionPage(task);
+      created++;
+    } catch (err) {
+      console.error(
+        `[import] Failed to create Notion page for task id=${task.id} "${task.content}":`,
+        err.message
+      );
+    }
+  }
+
+  console.log(
+    `[import] Todoist → Notion import complete: ${created} created, ${skipped} already mapped.`
+  );
+}
+
+/**
+ * POST /import/notion
+ * Resets the Notion poll cursor to a date far in the past so the very next
+ * cron tick (within 60 s) picks up every page in the database regardless of
+ * when it was last edited.  Already-mapped pages are updated; unmapped pages
+ * get a new Todoist task created.  Safe to call multiple times.
+ */
+app.post('/import/notion', (req, res) => {
+  lastPollTime = '2000-01-01T00:00:00.000Z';
+  store.setLastPollTime(lastPollTime);
+  console.log('[import] Notion poll cursor reset to 2000-01-01 — all pages will be imported on next cron tick.');
+  res.json({
+    status: 'scheduled',
+    message: 'Notion → Todoist import will run on the next poll cycle (within 60 s) — watch logs.',
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Startup connectivity checks
 // ---------------------------------------------------------------------------
 

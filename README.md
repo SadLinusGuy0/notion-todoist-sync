@@ -17,12 +17,15 @@ Before running the service, create a Notion database with **exactly** these prop
 | `Name` | Title | Task title |
 | `Due` | Date | Due date |
 | `Priority` | Select | Options: `P1`, `P2`, `P3`, `P4` |
-| `Done` | Checkbox | Completion state |
+| `Done` | Checkbox | Completion state (or use `Status` below) |
 | `Labels` | Multi-select | Todoist labels/tags — options are created automatically |
 | `Project` | Select | Todoist project name — read-only from Todoist |
 | `Recurring` | Checkbox | True when the task repeats on a schedule |
 | `Recurrence` | Rich Text | Recurrence pattern string, e.g. `every day`, `every Mon` |
 | `TodoistID` | Rich Text | Hidden — stores the Todoist task ID for reverse lookup |
+| `Status` | Select | Optional — values `Done` or `Completed` also mark a task as done |
+
+**Completion:** Either use the `Done` checkbox, or a `Status` select with options `Done` / `Completed`. Both sync to Todoist (complete task). Unchecking Done or changing Status away from Done reopens the task in Todoist.
 
 Then share the database with your Notion integration (click ··· → Connections on the database page).
 

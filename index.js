@@ -444,7 +444,7 @@ async function runStartupChecks() {
     }
 
     // Inform about optional properties that will be skipped until added.
-    const optional = ['Labels', 'Project', 'Recurring', 'Recurrence'];
+    const optional = ['Labels', 'Project', 'Recurring', 'Recurrence', 'Status'];
     const missingOptional = optional.filter((p) => !props.has(p));
     if (missingOptional.length > 0) {
       console.log(

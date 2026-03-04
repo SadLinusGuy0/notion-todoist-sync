@@ -131,8 +131,11 @@ function notionPageToTodoistTask(page) {
   const priorityLabel = props?.Priority?.select?.name ?? 'P4';
   const priority = NOTION_TO_TODOIST_PRIORITY[priorityLabel] ?? 1;
 
-  // Done checkbox
-  const is_done = props?.Done?.checkbox ?? false;
+  // Done checkbox, or Status select with "Done" / "Completed"
+  const doneCheckbox = props?.Done?.checkbox ?? false;
+  const statusName = props?.Status?.select?.name ?? '';
+  const statusDone = /^(done|completed)$/i.test(statusName.trim());
+  const is_done = doneCheckbox || statusDone;
 
   // Stored Todoist task ID (for reverse lookup)
   const todoist_id_parts = props?.TodoistID?.rich_text ?? [];

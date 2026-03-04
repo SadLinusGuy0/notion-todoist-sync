@@ -244,7 +244,12 @@ async function pollNotion(lastPollTime) {
             `[notionSync] Closed todoist task id=${todoistId} (Notion page marked done)`
           );
         } else {
-          // Regular update
+          // Page not done — reopen if it was completed in Todoist, then sync fields
+          try {
+            await todoistSync.reopenTodoistTask(todoistId);
+          } catch (err) {
+            // Task may already be active; reopen can fail in that case — continue to update
+          }
           await todoistSync.updateTodoistTask(todoistId, fields, notionId);
           store.markSynced(notionId, 'notion');
         }

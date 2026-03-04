@@ -138,6 +138,25 @@ async function closeTodoistTask(todoistId) {
 }
 
 /**
+ * Reopen a completed Todoist task (make it active again).
+ *
+ * @param {string} todoistId
+ * @returns {Promise<void>}
+ */
+async function reopenTodoistTask(todoistId) {
+  console.log(`[todoistSync] Reopening task id=${todoistId}`);
+
+  await axios.post(
+    `${BASE_URL}/tasks/${todoistId}/reopen`,
+    {},
+    { headers: getHeaders() }
+  );
+
+  store.markSynced(String(todoistId), 'notion');
+  console.log(`[todoistSync] Reopened task id=${todoistId}`);
+}
+
+/**
  * Delete a Todoist task.
  *
  * @param {string} todoistId
@@ -158,5 +177,6 @@ module.exports = {
   createTodoistTask,
   updateTodoistTask,
   closeTodoistTask,
+  reopenTodoistTask,
   deleteTodoistTask,
 };

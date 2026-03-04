@@ -21,6 +21,19 @@ function dbId() {
   return process.env.NOTION_DATABASE_ID;
 }
 
+/**
+ * Returns true when a Notion API error indicates the page is archived and
+ * cannot be edited.  In that case callers should treat the operation as a
+ * safe no-op rather than surfacing an error.
+ */
+function isArchivedError(err) {
+  return (
+    err?.code === 'validation_error' &&
+    typeof err?.message === 'string' &&
+    err.message.includes('archived')
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Write helpers (Notion side)
 // ---------------------------------------------------------------------------
@@ -63,15 +76,24 @@ async function updateNotionPage(notionId, task) {
   const projectName = await projectCache.getProjectName(task.project_id);
   const properties = todoistTaskToNotionProps(task, task.id, projectName);
 
-  const page = await notion().pages.update({
-    page_id: notionId,
-    properties,
-  });
+  try {
+    const page = await notion().pages.update({
+      page_id: notionId,
+      properties,
+    });
 
-  store.markSynced(notionId, 'todoist');
-  console.log(`[notionSync] Updated page id=${notionId}`);
-
-  return page;
+    store.markSynced(notionId, 'todoist');
+    console.log(`[notionSync] Updated page id=${notionId}`);
+    return page;
+  } catch (err) {
+    if (isArchivedError(err)) {
+      console.log(
+        `[notionSync] Page id=${notionId} is archived — skipping update.`
+      );
+      return null;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -103,17 +125,26 @@ async function archiveNotionPage(notionId) {
 async function markNotionDone(notionId) {
   console.log(`[notionSync] Marking page done id=${notionId}`);
 
-  const page = await notion().pages.update({
-    page_id: notionId,
-    properties: {
-      Done: { checkbox: true },
-    },
-  });
+  try {
+    const page = await notion().pages.update({
+      page_id: notionId,
+      properties: {
+        Done: { checkbox: true },
+      },
+    });
 
-  store.markSynced(notionId, 'todoist');
-  console.log(`[notionSync] Marked done page id=${notionId}`);
-
-  return page;
+    store.markSynced(notionId, 'todoist');
+    console.log(`[notionSync] Marked done page id=${notionId}`);
+    return page;
+  } catch (err) {
+    if (isArchivedError(err)) {
+      console.log(
+        `[notionSync] Page id=${notionId} is already archived — treating as done, skipping write.`
+      );
+      return null;
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

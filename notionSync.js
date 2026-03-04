@@ -3,7 +3,7 @@
 const { Client } = require('@notionhq/client');
 const axios = require('axios');
 const store = require('./store');
-const { notionPageToTodoistTask, todoistTaskToNotionProps } = require('./fieldMap');
+const { notionPageToTodoistTask, todoistTaskToNotionProps, hashTodoistTask } = require('./fieldMap');
 const todoistSync = require('./todoistSync');
 const projectCache = require('./projectCache');
 
@@ -258,113 +258,93 @@ async function pollNotion(lastPollTime) {
 }
 
 // ---------------------------------------------------------------------------
-// Todoist polling loop (Sync API)
+// Todoist polling loop (REST API with hash-based change detection)
 // ---------------------------------------------------------------------------
 
 /**
- * Poll the Todoist Sync API for items changed since `syncToken` and mirror
- * those changes into Notion.  Returns the new sync token to persist for the
- * next call.
- *
- * On first run pass '*' as syncToken — this triggers a full sync that returns
- * every active task.  Subsequent calls with the returned token receive only
- * incremental deltas, keeping API usage minimal.
- *
- * @param {string} syncToken  Previous sync token, or '*' for a full sync
- * @returns {Promise<string>}  New sync token to use on the next call
+ * Fetch every active task from the Todoist REST API, handling cursor
+ * pagination.  Returns a flat array of task objects.
  */
-async function pollTodoist(syncToken) {
-  console.log(
-    `[todoistPoll] Checking Todoist for changes (full_sync=${syncToken === '*'})...`
-  );
+async function fetchAllTodoistTasks() {
+  const tasks = [];
+  let cursor = null;
 
-  let response;
+  do {
+    const params = { limit: 200 };
+    if (cursor) params.cursor = cursor;
+
+    const response = await axios.get('https://api.todoist.com/api/v1/tasks', {
+      headers: { Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}` },
+      params,
+    });
+
+    const body = response.data;
+    const page = Array.isArray(body) ? body : (body.results ?? body.items ?? []);
+    tasks.push(...page);
+    cursor = body.next_cursor ?? null;
+  } while (cursor);
+
+  return tasks;
+}
+
+/**
+ * Poll Todoist for all active tasks and mirror any changes into Notion.
+ *
+ * Uses a SHA-1 hash of each task's synced fields to detect actual changes.
+ * Tasks whose hash matches the stored value are skipped, preventing unnecessary
+ * Notion writes and the echo loop that a naive full-fetch would cause.
+ *
+ * @returns {Promise<void>}
+ */
+async function pollTodoist() {
+  console.log('[todoistPoll] Fetching active tasks from Todoist...');
+
+  let tasks;
   try {
-    response = await axios.post(
-      'https://api.todoist.com/sync/v9/sync',
-      { sync_token: syncToken, resource_types: ['items'] },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    tasks = await fetchAllTodoistTasks();
   } catch (err) {
     console.error(
-      `[todoistPoll] Sync API request failed: ${err.response?.status ?? err.message}. ` +
+      `[todoistPoll] Failed to fetch tasks: ${err.response?.status ?? err.message}. ` +
         'Will retry next cycle.'
     );
-    return syncToken;
+    return;
   }
 
-  const { items = [], sync_token: newSyncToken, full_sync } = response.data;
-  console.log(`[todoistPoll] Received ${items.length} changed item(s)`);
+  console.log(`[todoistPoll] Processing ${tasks.length} active task(s)`);
+  let created = 0, updated = 0, skipped = 0;
 
-  for (const item of items) {
-    const todoistId = String(item.id);
+  for (const task of tasks) {
+    const todoistId = String(task.id);
 
-    // Skip items that were recently written by our own Notion→Todoist sync
-    // to prevent an echo loop.
+    // Skip tasks recently written by our own Notion→Todoist sync (echo prevention)
     if (store.isDebounced(todoistId)) {
-      console.log(`[todoistPoll] Skipping debounced item id=${todoistId}`);
+      skipped++;
       continue;
     }
 
     const existing = store.getByTodoistId(todoistId);
+    const newHash = hashTodoistTask(task);
 
-    // ── Deleted ──────────────────────────────────────────────────────────────
-    if (item.is_deleted) {
-      if (existing) {
-        console.log(
-          `[todoistPoll] Task deleted id=${todoistId} → archiving Notion page id=${existing.notion_id}`
-        );
-        await archiveNotionPage(existing.notion_id);
-        store.markSynced(todoistId, 'todoist');
-      }
-      continue;
-    }
-
-    // Normalise the Sync API item shape to match what the REST API returns so
-    // fieldMap and notionSync helpers work without modification.
-    const isCompleted = item.checked === true || item.checked === 1;
-    const task = { ...item, is_completed: isCompleted };
-
-    // ── Completed ─────────────────────────────────────────────────────────────
-    if (isCompleted) {
-      if (existing) {
-        if (item.due?.is_recurring) {
-          // Recurring task: the due date has advanced — update Notion page
-          // rather than marking it done.
-          console.log(
-            `[todoistPoll] Recurring task completed id=${todoistId} → updating Notion due date`
-          );
-          await updateNotionPage(existing.notion_id, task);
-        } else {
-          console.log(
-            `[todoistPoll] Task completed id=${todoistId} → marking Notion page done`
-          );
-          await markNotionDone(existing.notion_id);
-        }
-        store.markSynced(todoistId, 'todoist');
-      }
-      // Don't create new Notion pages for tasks that are already completed.
-      continue;
-    }
-
-    // ── Active (new or updated) ───────────────────────────────────────────────
     try {
-      if (existing) {
+      if (!existing) {
+        // Task not yet in Notion — webhook must have been missed
         console.log(
-          `[todoistPoll] Updating Notion page id=${existing.notion_id} for task id=${todoistId}`
+          `[todoistPoll] New task id=${todoistId} "${task.content}" → creating Notion page`
+        );
+        await createNotionPage(task);
+        store.setTaskHash(todoistId, newHash);
+        created++;
+      } else if (existing.task_hash !== newHash) {
+        // One or more synced fields changed since last write
+        console.log(
+          `[todoistPoll] Task id=${todoistId} changed → updating Notion page id=${existing.notion_id}`
         );
         await updateNotionPage(existing.notion_id, task);
         store.markSynced(todoistId, 'todoist');
+        store.setTaskHash(todoistId, newHash);
+        updated++;
       } else {
-        console.log(
-          `[todoistPoll] New task id=${todoistId} "${item.content}" → creating Notion page`
-        );
-        await createNotionPage(task);
+        skipped++;
       }
     } catch (err) {
       console.error(
@@ -374,7 +354,9 @@ async function pollTodoist(syncToken) {
     }
   }
 
-  return newSyncToken;
+  console.log(
+    `[todoistPoll] Done — ${created} created, ${updated} updated, ${skipped} unchanged/debounced`
+  );
 }
 
 module.exports = {

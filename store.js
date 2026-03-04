@@ -25,6 +25,7 @@ function createSqliteStore() {
       notion_id     TEXT,
       last_synced_at INTEGER NOT NULL,
       origin        TEXT NOT NULL,
+      task_hash     TEXT,
       PRIMARY KEY (todoist_id, notion_id)
     );
 
@@ -34,6 +35,11 @@ function createSqliteStore() {
     );
   `);
 
+  // Migrate existing databases that were created before task_hash was added
+  try {
+    db.exec('ALTER TABLE sync_map ADD COLUMN task_hash TEXT');
+  } catch { /* column already exists — safe to ignore */ }
+
   const stmtUpsert = db.prepare(`
     INSERT INTO sync_map (todoist_id, notion_id, last_synced_at, origin)
     VALUES (@todoistId, @notionId, @lastSyncedAt, @origin)
@@ -41,6 +47,10 @@ function createSqliteStore() {
       last_synced_at = excluded.last_synced_at,
       origin         = excluded.origin
   `);
+
+  const stmtSetHash = db.prepare(
+    'UPDATE sync_map SET task_hash = ? WHERE todoist_id = ?'
+  );
 
   const stmtGetByTodoist = db.prepare(
     'SELECT * FROM sync_map WHERE todoist_id = ?'
@@ -152,6 +162,16 @@ function createSqliteStore() {
       const row = stmtGetPoll.get('todoist_sync_token');
       return row ? row.value : null;
     },
+
+    /**
+     * Persist a SHA-1 hash of the Todoist task's key fields so the polling
+     * loop can skip updates when nothing has changed.
+     * @param {string} todoistId
+     * @param {string} hash
+     */
+    setTaskHash(todoistId, hash) {
+      stmtSetHash.run(hash, todoistId);
+    },
   };
 }
 
@@ -199,6 +219,7 @@ function createJsonStore() {
         notion_id: entry.notionId,
         last_synced_at: entry.lastSyncedAt,
         origin: entry.origin,
+        task_hash: entry.taskHash ?? null,
       };
     },
 
@@ -257,6 +278,15 @@ function createJsonStore() {
     getTodoistSyncToken() {
       const data = loadJson();
       return data.poll.todoist_sync_token || null;
+    },
+
+    setTaskHash(todoistId, hash) {
+      const data = loadJson();
+      const entry = Object.values(data.map).find((r) => r.todoistId === todoistId);
+      if (entry) {
+        entry.taskHash = hash;
+        saveJson(data);
+      }
     },
   };
 }

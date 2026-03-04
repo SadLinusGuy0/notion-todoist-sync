@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 // ---------------------------------------------------------------------------
 // Priority mapping
 //
@@ -151,9 +153,37 @@ function todoistTaskToNotionProps(task, todoistId, projectName) {
   return props;
 }
 
+// ---------------------------------------------------------------------------
+// Task hash — change detection for the Todoist polling loop
+// ---------------------------------------------------------------------------
+
+/**
+ * Produce a short SHA-1 digest of the fields we sync from Todoist.
+ * The polling loop compares this against the stored hash and skips the Notion
+ * update when the hash is unchanged, preventing unnecessary writes and the
+ * echo loop that would follow.
+ *
+ * @param {object} task  Todoist REST API task object
+ * @returns {string}  40-char hex SHA-1 digest
+ */
+function hashTodoistTask(task) {
+  const normalized = [
+    task.content ?? '',
+    String(task.priority ?? 1),
+    task.due?.date ?? '',
+    task.due?.is_recurring ? '1' : '0',
+    task.due?.string ?? '',
+    (task.labels ?? []).slice().sort().join(','),
+    String(task.project_id ?? ''),
+  ].join('\x00');
+
+  return crypto.createHash('sha1').update(normalized).digest('hex');
+}
+
 module.exports = {
   notionPageToTodoistTask,
   todoistTaskToNotionProps,
+  hashTodoistTask,
   TODOIST_TO_NOTION_PRIORITY,
   NOTION_TO_TODOIST_PRIORITY,
 };

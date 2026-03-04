@@ -283,14 +283,11 @@ async function handleLabelEvent(eventName, label) {
 
     case 'label:updated':
     case 'label:deleted': {
-      // A renamed or deleted label may already appear on synced Notion pages.
-      // Force a full Todoist resync on the next cron tick: all tasks will be
-      // re-fetched and their Labels multi-selects updated in Notion.
-      todoistSyncToken = '*';
-      store.setTodoistSyncToken('*');
+      // The next Todoist poll fetches all tasks with their current label arrays.
+      // Any task whose labels changed will have a different hash and its Notion
+      // page will be updated automatically — no manual reset needed.
       console.log(
-        `[webhook] ${eventName} — Todoist sync token reset; ` +
-          'all tasks will be re-synced to Notion on the next cron cycle'
+        `[webhook] ${eventName} — affected task labels will update on the next poll cycle`
       );
       break;
     }
@@ -308,10 +305,7 @@ async function handleLabelEvent(eventName, label) {
 let lastPollTime =
   store.getLastPollTime() ?? new Date(Date.now() - 60_000).toISOString();
 
-// Todoist → Notion: Sync API token ('*' = full sync on first run)
-let todoistSyncToken = store.getTodoistSyncToken() ?? '*';
-
-console.log(`[cron] Initialising sync. Notion lastPollTime=${lastPollTime}, Todoist syncToken=${todoistSyncToken === '*' ? 'FULL' : 'incremental'}`);
+console.log(`[cron] Initialising sync. Notion lastPollTime=${lastPollTime}`);
 
 cron.schedule('*/1 * * * *', async () => {
   console.log('[cron] Starting bidirectional sync cycle');
@@ -325,11 +319,9 @@ cron.schedule('*/1 * * * *', async () => {
     console.error('[cron] Notion poll error:', err.message);
   }
 
-  // ── Todoist → Notion ──────────────────────────────────────────────────────
+  // ── Todoist → Notion (hash-based, skips unchanged tasks) ──────────────────
   try {
-    const newSyncToken = await notionSync.pollTodoist(todoistSyncToken);
-    todoistSyncToken = newSyncToken;
-    store.setTodoistSyncToken(todoistSyncToken);
+    await notionSync.pollTodoist();
   } catch (err) {
     console.error('[cron] Todoist poll error:', err.message);
   }

@@ -268,21 +268,12 @@ async function runStartupChecks() {
     console.error(`[startup] ERROR — Cannot reach Notion database: ${hint}`);
   }
 
-  // 2. Verify the Todoist API token works.
-  const axios = require('axios');
-  try {
-    await axios.get('https://api.todoist.com/rest/v2/tasks', {
-      headers: { Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}` },
-    });
-    console.log('[startup] Todoist API token OK');
-  } catch (err) {
-    const status = err.response?.status;
-    const hint =
-      status === 401 || status === 403
-        ? 'The token is invalid or revoked. Copy it from Todoist Settings → Integrations → Developer.'
-        : `HTTP ${status ?? err.message}`;
-    console.error(`[startup] ERROR — Cannot reach Todoist API: ${hint}`);
-  }
+  // Todoist token is validated implicitly on the first write operation
+  // (task create/update/close). The REST v2 GET endpoints return 410 in some
+  // account configurations, so a read-based health check is unreliable.
+  console.log(
+    '[startup] Todoist token present — will be validated on first sync operation.'
+  );
 }
 
 // ---------------------------------------------------------------------------

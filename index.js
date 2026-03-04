@@ -251,18 +251,30 @@ app.post('/import/todoist', (req, res) => {
 
 async function importFromTodoist() {
   console.log('[import] Starting Todoist → Notion bulk import...');
-  let tasks;
+  const axios = require('axios');
+
+  // The /api/v1/tasks endpoint is paginated via cursor.  Collect all pages.
+  const tasks = [];
+  let cursor = null;
+
   try {
-    const axios = require('axios');
-    const response = await axios.get('https://api.todoist.com/api/v1/tasks', {
-      headers: { Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}` },
-    });
-    tasks = response.data;
+    do {
+      const params = { limit: 200 };
+      if (cursor) params.cursor = cursor;
+
+      const response = await axios.get('https://api.todoist.com/api/v1/tasks', {
+        headers: { Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}` },
+        params,
+      });
+
+      const body = response.data;
+      const page = Array.isArray(body) ? body : (body.results ?? body.items ?? []);
+      tasks.push(...page);
+      cursor = body.next_cursor ?? null;
+    } while (cursor);
   } catch (err) {
     console.error(
-      `[import] Could not fetch tasks from Todoist: HTTP ${err.response?.status ?? err.message}. ` +
-        'If you see 410, the Todoist REST v2 GET /tasks endpoint may be unavailable for your ' +
-        'account — use the Notion → Todoist import instead and let Notion be the source of truth.'
+      `[import] Could not fetch tasks from Todoist: HTTP ${err.response?.status ?? err.message}.`
     );
     return;
   }

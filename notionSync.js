@@ -41,29 +41,66 @@ function isArchivedError(err) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Tracks Todoist IDs for which a Notion page creation is currently in-flight.
+ * Prevents a concurrent webhook + poll from both calling createNotionPage for
+ * the same task before either has had a chance to write to the store.
+ */
+const _creatingForTodoistId = new Set();
+
+/**
  * Create a new Notion page in the configured database from a Todoist task.
  *
+ * Includes three duplicate guards:
+ *  1. Pre-create store check — if a mapping already exists, update instead.
+ *  2. In-flight set — blocks a second concurrent create for the same task ID.
+ *  3. Post-create store write — so any subsequent call hits guard #1.
+ *
  * @param {object} task  Raw Todoist task object
- * @returns {Promise<object>}  The created Notion page object
+ * @returns {Promise<object|null>}  The created (or updated) Notion page object
  */
 async function createNotionPage(task) {
-  console.log(`[notionSync] Creating page for todoist task id=${task.id} "${task.content}"`);
+  const todoistId = String(task.id);
 
-  const projectName = await projectCache.getProjectName(task.project_id);
-  const rawProperties = todoistTaskToNotionProps(task, task.id, projectName);
-  const properties = await filterProps(rawProperties);
+  // Guard 1: mapping already exists (e.g. webhook beat the poll to it)
+  const alreadyMapped = store.getByTodoistId(todoistId);
+  if (alreadyMapped) {
+    console.log(
+      `[notionSync] Task id=${todoistId} already mapped to page id=${alreadyMapped.notion_id} — updating instead of creating duplicate`
+    );
+    return updateNotionPage(alreadyMapped.notion_id, task);
+  }
 
-  const page = await notion().pages.create({
-    parent: { database_id: dbId() },
-    properties,
-  });
+  // Guard 2: another async call is already creating a page for this task
+  if (_creatingForTodoistId.has(todoistId)) {
+    console.log(
+      `[notionSync] Task id=${todoistId} is already being created — skipping concurrent duplicate`
+    );
+    return null;
+  }
 
-  console.log(`[notionSync] Created page id=${page.id} for todoist_id=${task.id}`);
+  _creatingForTodoistId.add(todoistId);
 
-  // Persist mapping; origin=todoist so the poll loop debounces it.
-  store.upsert(String(task.id), page.id, 'todoist');
+  try {
+    console.log(`[notionSync] Creating page for todoist task id=${todoistId} "${task.content}"`);
 
-  return page;
+    const projectName = await projectCache.getProjectName(task.project_id);
+    const rawProperties = todoistTaskToNotionProps(task, todoistId, projectName);
+    const properties = await filterProps(rawProperties);
+
+    const page = await notion().pages.create({
+      parent: { database_id: dbId() },
+      properties,
+    });
+
+    console.log(`[notionSync] Created page id=${page.id} for todoist_id=${todoistId}`);
+
+    // Guard 3: persist mapping immediately so any racing caller hits guard #1
+    store.upsert(todoistId, page.id, 'todoist');
+
+    return page;
+  } finally {
+    _creatingForTodoistId.delete(todoistId);
+  }
 }
 
 /**
@@ -213,6 +250,21 @@ async function pollNotion(lastPollTime) {
 
     try {
       if (!existing) {
+        // Before creating a new Todoist task, check whether the Notion page
+        // already has a TodoistID written into it (e.g. after a store wipe,
+        // service restart, or manual import).  If it does, reconcile the
+        // mapping rather than creating a duplicate task.
+        if (fields.todoist_id) {
+          console.log(
+            `[notionSync] Page id=${notionId} already has TodoistID=${fields.todoist_id} — ` +
+              'registering mapping and updating task instead of creating duplicate'
+          );
+          store.upsert(fields.todoist_id, notionId, 'notion');
+          await todoistSync.updateTodoistTask(fields.todoist_id, fields, notionId);
+          store.markSynced(notionId, 'notion');
+          continue;
+        }
+
         // New page — create a matching Todoist task
         const task = await todoistSync.createTodoistTask(fields, notionId);
 

@@ -425,41 +425,44 @@ app.post('/import/notion', (req, res) => {
 // ---------------------------------------------------------------------------
 
 async function runStartupChecks() {
-  const { Client } = require('@notionhq/client');
-  const notionClient = new Client({ auth: process.env.NOTION_API_KEY });
+  const { refreshSchema } = require('./notionSchema');
 
-  // 1. Verify the Notion integration can reach the target database.
+  // 1. Fetch the Notion database schema (this also warms the filterProps cache
+  //    so the first webhook/poll call doesn't need to do an extra round-trip).
   try {
-    const db = await notionClient.databases.retrieve({
-      database_id: process.env.NOTION_DATABASE_ID,
-    });
-    console.log(
-      `[startup] Notion database OK — "${db.title?.[0]?.plain_text ?? db.id}"`
-    );
+    const { props, title } = await refreshSchema();
+    console.log(`[startup] Notion database OK — "${title}"`);
 
-    // Warn if any expected properties are missing.
+    // Warn about required properties that are absent.
     const required = ['Name', 'Due', 'Priority', 'Done', 'TodoistID'];
-    const present = Object.keys(db.properties);
-    const missing = required.filter((p) => !present.includes(p));
-    if (missing.length > 0) {
+    const missingRequired = required.filter((p) => !props.has(p));
+    if (missingRequired.length > 0) {
       console.warn(
-        `[startup] WARNING — Notion database is missing expected properties: ${missing.join(', ')}. ` +
-          'Sync will fail until these are added. See README for the required schema.'
+        `[startup] WARNING — missing required properties: ${missingRequired.join(', ')}. ` +
+          'Core sync will not work until these are added. See README for schema.'
+      );
+    }
+
+    // Inform about optional properties that will be skipped until added.
+    const optional = ['Labels', 'Project', 'Recurring', 'Recurrence'];
+    const missingOptional = optional.filter((p) => !props.has(p));
+    if (missingOptional.length > 0) {
+      console.log(
+        `[startup] NOTE — optional properties not found in database (will be skipped until added): ` +
+          missingOptional.join(', ')
       );
     }
   } catch (err) {
     const hint =
       err.code === 'object_not_found'
-        ? 'Check that NOTION_DATABASE_ID is correct and the integration has been added as a Connection to the database.'
+        ? 'Check that NOTION_DATABASE_ID is correct and the integration has been added as a Connection.'
         : err.code === 'unauthorized'
         ? 'Check that NOTION_API_KEY is correct and the integration exists.'
         : err.message;
     console.error(`[startup] ERROR — Cannot reach Notion database: ${hint}`);
   }
 
-  // Todoist token is validated implicitly on the first write operation
-  // (task create/update/close). The REST v2 GET endpoints return 410 in some
-  // account configurations, so a read-based health check is unreliable.
+  // Todoist token is validated implicitly on the first write operation.
   console.log(
     '[startup] Todoist token present — will be validated on first sync operation.'
   );

@@ -2,6 +2,7 @@
 
 const axios = require('axios');
 const store = require('./store');
+const { hasTime } = require('./fieldMap');
 
 const BASE_URL = 'https://api.todoist.com/api/v1';
 
@@ -20,7 +21,15 @@ function getHeaders() {
  * Build the subset of Todoist task fields that the REST API accepts on
  * create/update from a normalised task-fields object.
  *
- * @param {{ content, due_date?, priority, labels?, recurrence_string? }} fields
+ * @param {{
+ *   content: string,
+ *   due_date?: string,
+ *   priority?: number,
+ *   labels?: string[],
+ *   recurrence_string?: string,
+ *   duration_amount?: number,
+ *   duration_unit?: 'minute'|'day'
+ * }} fields
  */
 function buildTaskPayload(fields) {
   const payload = {
@@ -28,17 +37,27 @@ function buildTaskPayload(fields) {
     priority: fields.priority ?? 1,
   };
 
-  // Labels are an array of label-name strings in the Todoist API
+  // Labels
   if (Array.isArray(fields.labels) && fields.labels.length > 0) {
     payload.labels = fields.labels;
   }
 
-  // Prefer due_string when a recurrence pattern is present — this preserves
-  // the recurring schedule in Todoist.  Fall back to a plain due_date.
+  // Duration — must be set alongside a due date/datetime to take effect
+  if (fields.duration_amount && fields.duration_unit) {
+    payload.duration = fields.duration_amount;
+    payload.duration_unit = fields.duration_unit;
+  }
+
+  // Due date/time — prefer due_string for recurrence, then due_datetime for
+  // timed tasks (string contains 'T'), then plain due_date for date-only tasks.
   if (fields.recurrence_string) {
     payload.due_string = fields.recurrence_string;
   } else if (fields.due_date) {
-    payload.due_date = fields.due_date;
+    if (hasTime(fields.due_date)) {
+      payload.due_datetime = fields.due_date;
+    } else {
+      payload.due_date = fields.due_date;
+    }
   }
 
   return payload;

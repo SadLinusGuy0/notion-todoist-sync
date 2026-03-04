@@ -146,15 +146,22 @@ async function updateNotionPage(notionId, task) {
 async function archiveNotionPage(notionId) {
   console.log(`[notionSync] Archiving page id=${notionId}`);
 
-  const page = await notion().pages.update({
-    page_id: notionId,
-    archived: true,
-  });
+  try {
+    const page = await notion().pages.update({
+      page_id: notionId,
+      archived: true,
+    });
 
-  store.markSynced(notionId, 'todoist');
-  console.log(`[notionSync] Archived page id=${notionId}`);
-
-  return page;
+    store.markSynced(notionId, 'todoist');
+    console.log(`[notionSync] Archived page id=${notionId}`);
+    return page;
+  } catch (err) {
+    if (isArchivedError(err)) {
+      console.log(`[notionSync] Page id=${notionId} is already archived — skipping.`);
+      return null;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -269,16 +276,24 @@ async function pollNotion(lastPollTime) {
         const task = await todoistSync.createTodoistTask(fields, notionId);
 
         // Write the Todoist ID back into the Notion page so future lookups work
-        await notion().pages.update({
-          page_id: notionId,
-          properties: {
-            TodoistID: {
-              rich_text: [
-                { type: 'text', text: { content: String(task.id) } },
-              ],
+        try {
+          await notion().pages.update({
+            page_id: notionId,
+            properties: {
+              TodoistID: {
+                rich_text: [
+                  { type: 'text', text: { content: String(task.id) } },
+                ],
+              },
             },
-          },
-        });
+          });
+        } catch (err) {
+          if (isArchivedError(err)) {
+            console.log(`[notionSync] Page id=${notionId} was archived before TodoistID could be written — skipping.`);
+          } else {
+            throw err;
+          }
+        }
 
         // Stamp debounce so the next poll doesn't re-process this page
         store.upsert(String(task.id), notionId, 'notion');

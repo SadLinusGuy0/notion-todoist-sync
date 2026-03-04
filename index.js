@@ -76,7 +76,16 @@ function isValidTodoistSignature(rawBody, signature) {
     .createHmac('sha256', process.env.WEBHOOK_SECRET)
     .update(rawBody)
     .digest('base64');
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+  try {
+    // timingSafeEqual throws if the two buffers have different byte lengths,
+    // which would happen if the incoming signature is malformed.
+    return crypto.timingSafeEqual(
+      Buffer.from(expected, 'utf8'),
+      Buffer.from(signature, 'utf8')
+    );
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -84,10 +93,18 @@ function isValidTodoistSignature(rawBody, signature) {
 // ---------------------------------------------------------------------------
 
 app.post('/webhook/todoist', async (req, res) => {
+  // Log every inbound request so we can confirm Todoist is actually reaching us.
+  console.log(
+    `[webhook] Inbound POST /webhook/todoist — has-signature=${!!req.headers['x-todoist-hmac-sha256']}`
+  );
+
   // Validate signature
   const signature = req.headers['x-todoist-hmac-sha256'];
   if (!isValidTodoistSignature(req.rawBody, signature)) {
-    console.warn('[webhook] Rejected request with invalid HMAC signature');
+    console.warn(
+      '[webhook] Rejected — HMAC signature invalid. ' +
+        'Check that WEBHOOK_SECRET matches the client secret set in the Todoist App Console.'
+    );
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
@@ -215,6 +232,58 @@ cron.schedule('*/1 * * * *', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Startup connectivity checks
+// ---------------------------------------------------------------------------
+
+async function runStartupChecks() {
+  const { Client } = require('@notionhq/client');
+  const notionClient = new Client({ auth: process.env.NOTION_API_KEY });
+
+  // 1. Verify the Notion integration can reach the target database.
+  try {
+    const db = await notionClient.databases.retrieve({
+      database_id: process.env.NOTION_DATABASE_ID,
+    });
+    console.log(
+      `[startup] Notion database OK — "${db.title?.[0]?.plain_text ?? db.id}"`
+    );
+
+    // Warn if any expected properties are missing.
+    const required = ['Name', 'Due', 'Priority', 'Done', 'TodoistID'];
+    const present = Object.keys(db.properties);
+    const missing = required.filter((p) => !present.includes(p));
+    if (missing.length > 0) {
+      console.warn(
+        `[startup] WARNING — Notion database is missing expected properties: ${missing.join(', ')}. ` +
+          'Sync will fail until these are added. See README for the required schema.'
+      );
+    }
+  } catch (err) {
+    const hint =
+      err.code === 'object_not_found'
+        ? 'Check that NOTION_DATABASE_ID is correct and the integration has been added as a Connection to the database.'
+        : err.code === 'unauthorized'
+        ? 'Check that NOTION_API_KEY is correct and the integration exists.'
+        : err.message;
+    console.error(`[startup] ERROR — Cannot reach Notion database: ${hint}`);
+  }
+
+  // 2. Verify the Todoist API token works.
+  const axios = require('axios');
+  try {
+    await axios.get('https://api.todoist.com/rest/v2/projects', {
+      headers: { Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}` },
+    });
+    console.log('[startup] Todoist API token OK');
+  } catch (err) {
+    console.error(
+      `[startup] ERROR — Cannot reach Todoist API: ${err.response?.status ?? err.message}. ` +
+        'Check that TODOIST_API_TOKEN is correct.'
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Start server
 // ---------------------------------------------------------------------------
 
@@ -222,4 +291,5 @@ app.listen(PORT, () => {
   console.log(`[index] notion-todoist-sync running on port ${PORT}`);
   console.log(`[index] Webhook endpoint: POST http://localhost:${PORT}/webhook/todoist`);
   console.log(`[index] Health check:     GET  http://localhost:${PORT}/health`);
+  runStartupChecks();
 });

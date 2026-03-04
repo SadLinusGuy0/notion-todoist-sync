@@ -5,7 +5,16 @@ const store = require('./store');
 const { notionPageToTodoistTask, todoistTaskToNotionProps } = require('./fieldMap');
 const todoistSync = require('./todoistSync');
 
-const notion = new Client({ auth: process.env.NOTION_API_KEY });
+// Client is created lazily so that the env var is always read at call time,
+// and so that a bad key produces a clear error at the first API call rather
+// than a silent failure at module load.
+let _notion = null;
+function notion() {
+  if (!_notion) {
+    _notion = new Client({ auth: process.env.NOTION_API_KEY });
+  }
+  return _notion;
+}
 
 function dbId() {
   return process.env.NOTION_DATABASE_ID;
@@ -26,7 +35,7 @@ async function createNotionPage(task) {
 
   const properties = todoistTaskToNotionProps(task, task.id);
 
-  const page = await notion.pages.create({
+  const page = await notion().pages.create({
     parent: { database_id: dbId() },
     properties,
   });
@@ -51,7 +60,7 @@ async function updateNotionPage(notionId, task) {
 
   const properties = todoistTaskToNotionProps(task, task.id);
 
-  const page = await notion.pages.update({
+  const page = await notion().pages.update({
     page_id: notionId,
     properties,
   });
@@ -71,7 +80,7 @@ async function updateNotionPage(notionId, task) {
 async function archiveNotionPage(notionId) {
   console.log(`[notionSync] Archiving page id=${notionId}`);
 
-  const page = await notion.pages.update({
+  const page = await notion().pages.update({
     page_id: notionId,
     archived: true,
   });
@@ -91,7 +100,7 @@ async function archiveNotionPage(notionId) {
 async function markNotionDone(notionId) {
   console.log(`[notionSync] Marking page done id=${notionId}`);
 
-  const page = await notion.pages.update({
+  const page = await notion().pages.update({
     page_id: notionId,
     properties: {
       Done: { checkbox: true },
@@ -124,7 +133,7 @@ async function pollNotion(lastPollTime) {
 
   try {
     // Notion filter: last_edited_time is an implicit filter via after
-    const response = await notion.databases.query({
+    const response = await notion().databases.query({
       database_id: dbId(),
       filter: {
         timestamp: 'last_edited_time',
@@ -170,7 +179,7 @@ async function pollNotion(lastPollTime) {
         const task = await todoistSync.createTodoistTask(fields, notionId);
 
         // Write the Todoist ID back into the Notion page so future lookups work
-        await notion.pages.update({
+        await notion().pages.update({
           page_id: notionId,
           properties: {
             TodoistID: {

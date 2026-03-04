@@ -271,15 +271,17 @@ async function runStartupChecks() {
   // 2. Verify the Todoist API token works.
   const axios = require('axios');
   try {
-    await axios.get('https://api.todoist.com/rest/v2/projects', {
+    await axios.get('https://api.todoist.com/rest/v2/tasks', {
       headers: { Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}` },
     });
     console.log('[startup] Todoist API token OK');
   } catch (err) {
-    console.error(
-      `[startup] ERROR — Cannot reach Todoist API: ${err.response?.status ?? err.message}. ` +
-        'Check that TODOIST_API_TOKEN is correct.'
-    );
+    const status = err.response?.status;
+    const hint =
+      status === 401 || status === 403
+        ? 'The token is invalid or revoked. Copy it from Todoist Settings → Integrations → Developer.'
+        : `HTTP ${status ?? err.message}`;
+    console.error(`[startup] ERROR — Cannot reach Todoist API: ${hint}`);
   }
 }
 

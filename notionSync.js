@@ -419,6 +419,70 @@ async function pollTodoist() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Startup reconciliation
+// ---------------------------------------------------------------------------
+
+/**
+ * Rebuild the sync store from Notion by scanning every page that already has
+ * a `TodoistID` property set.  This is the only durable way to survive service
+ * restarts on platforms (like Railway) with an ephemeral filesystem, where the
+ * SQLite store is wiped each time the container starts.
+ *
+ * After this runs the poll loops will see all existing mappings and skip
+ * already-synced tasks/pages rather than recreating them as duplicates.
+ *
+ * Safe to call on every startup — it only registers entries that are absent
+ * from the store, leaving any entries already written during this process run
+ * untouched.
+ *
+ * @returns {Promise<void>}
+ */
+async function reconcileStore() {
+  console.log('[reconcile] Scanning Notion for existing TodoistID mappings...');
+
+  let cursor;
+  let registered = 0;
+  let alreadyKnown = 0;
+
+  do {
+    let response;
+    try {
+      response = await notion().databases.query({
+        database_id: dbId(),
+        filter: {
+          property: 'TodoistID',
+          rich_text: { is_not_empty: true },
+        },
+        page_size: 100,
+        ...(cursor ? { start_cursor: cursor } : {}),
+      });
+    } catch (err) {
+      console.error('[reconcile] Failed to query Notion:', err.message);
+      return;
+    }
+
+    for (const page of response.results) {
+      const parts = page.properties?.TodoistID?.rich_text ?? [];
+      const todoistId = parts.map((t) => t.plain_text).join('').trim();
+      if (!todoistId) continue;
+
+      if (store.getByTodoistId(todoistId)) {
+        alreadyKnown++;
+      } else {
+        store.upsert(todoistId, page.id, 'todoist');
+        registered++;
+      }
+    }
+
+    cursor = response.has_more ? response.next_cursor : undefined;
+  } while (cursor);
+
+  console.log(
+    `[reconcile] Done — ${registered} mapping(s) restored, ${alreadyKnown} already known.`
+  );
+}
+
 module.exports = {
   createNotionPage,
   updateNotionPage,
@@ -426,4 +490,5 @@ module.exports = {
   markNotionDone,
   pollNotion,
   pollTodoist,
+  reconcileStore,
 };

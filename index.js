@@ -305,9 +305,18 @@ async function handleLabelEvent(eventName, label) {
 let lastPollTime =
   store.getLastPollTime() ?? new Date(Date.now() - 60_000).toISOString();
 
+// Guard that prevents the cron from running before startup reconciliation
+// completes.  Set to true by runStartupChecks() once reconcileStore() finishes.
+let startupReady = false;
+
 console.log(`[cron] Initialising sync. Notion lastPollTime=${lastPollTime}`);
 
 cron.schedule('*/1 * * * *', async () => {
+  if (!startupReady) {
+    console.log('[cron] Waiting for startup reconciliation to complete — skipping this tick.');
+    return;
+  }
+
   console.log('[cron] Starting bidirectional sync cycle');
 
   // ── Notion → Todoist ──────────────────────────────────────────────────────
@@ -429,9 +438,11 @@ async function runStartupChecks() {
 
   // 1. Fetch the Notion database schema (this also warms the filterProps cache
   //    so the first webhook/poll call doesn't need to do an extra round-trip).
+  let notionReachable = false;
   try {
     const { props, title } = await refreshSchema();
     console.log(`[startup] Notion database OK — "${title}"`);
+    notionReachable = true;
 
     // Warn about required properties that are absent.
     const required = ['Name', 'Due', 'Priority', 'Done', 'TodoistID'];
@@ -462,10 +473,26 @@ async function runStartupChecks() {
     console.error(`[startup] ERROR — Cannot reach Notion database: ${hint}`);
   }
 
+  // 2. Rebuild the sync store from Notion's TodoistID properties so that a
+  //    restart on Railway (ephemeral filesystem) doesn't cause every task to
+  //    be recreated as a duplicate.
+  if (notionReachable) {
+    await notionSync.reconcileStore();
+  } else {
+    console.warn(
+      '[startup] Skipping store reconciliation — Notion was unreachable. ' +
+        'Duplicates may occur on this cycle. Retrying on next restart.'
+    );
+  }
+
   // Todoist token is validated implicitly on the first write operation.
   console.log(
     '[startup] Todoist token present — will be validated on first sync operation.'
   );
+
+  // Release the cron gate — poll loops can now run safely.
+  startupReady = true;
+  console.log('[startup] Startup complete — sync cycles are now active.');
 }
 
 // ---------------------------------------------------------------------------

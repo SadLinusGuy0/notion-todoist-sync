@@ -222,26 +222,40 @@ async function handleTodoistEvent(eventName, task) {
 }
 
 // ---------------------------------------------------------------------------
-// Notion polling cron job — every 60 seconds
+// Bidirectional sync cron — every 60 seconds
 // ---------------------------------------------------------------------------
 
-// Initialise last poll time to now on startup so we don't reprocess all
-// historical pages on the first run.
+// Notion → Todoist: track pages modified since this timestamp
 let lastPollTime =
   store.getLastPollTime() ?? new Date(Date.now() - 60_000).toISOString();
 
-console.log(`[cron] Initialising Notion poll. Last poll time: ${lastPollTime}`);
+// Todoist → Notion: Sync API token ('*' = full sync on first run)
+let todoistSyncToken = store.getTodoistSyncToken() ?? '*';
+
+console.log(`[cron] Initialising sync. Notion lastPollTime=${lastPollTime}, Todoist syncToken=${todoistSyncToken === '*' ? 'FULL' : 'incremental'}`);
 
 cron.schedule('*/1 * * * *', async () => {
-  console.log('[cron] Starting Notion poll cycle');
+  console.log('[cron] Starting bidirectional sync cycle');
+
+  // ── Notion → Todoist ──────────────────────────────────────────────────────
   try {
     const newPollTime = await notionSync.pollNotion(lastPollTime);
     lastPollTime = newPollTime;
     store.setLastPollTime(lastPollTime);
-    console.log(`[cron] Poll cycle complete. Next poll will use lastPollTime=${lastPollTime}`);
   } catch (err) {
-    console.error('[cron] Unhandled error in poll cycle:', err.message);
+    console.error('[cron] Notion poll error:', err.message);
   }
+
+  // ── Todoist → Notion ──────────────────────────────────────────────────────
+  try {
+    const newSyncToken = await notionSync.pollTodoist(todoistSyncToken);
+    todoistSyncToken = newSyncToken;
+    store.setTodoistSyncToken(todoistSyncToken);
+  } catch (err) {
+    console.error('[cron] Todoist poll error:', err.message);
+  }
+
+  console.log('[cron] Sync cycle complete');
 });
 
 // ---------------------------------------------------------------------------

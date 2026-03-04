@@ -1,6 +1,7 @@
 'use strict';
 
 const { Client } = require('@notionhq/client');
+const axios = require('axios');
 const store = require('./store');
 const { notionPageToTodoistTask, todoistTaskToNotionProps } = require('./fieldMap');
 const todoistSync = require('./todoistSync');
@@ -256,10 +257,131 @@ async function pollNotion(lastPollTime) {
   return pollStart;
 }
 
+// ---------------------------------------------------------------------------
+// Todoist polling loop (Sync API)
+// ---------------------------------------------------------------------------
+
+/**
+ * Poll the Todoist Sync API for items changed since `syncToken` and mirror
+ * those changes into Notion.  Returns the new sync token to persist for the
+ * next call.
+ *
+ * On first run pass '*' as syncToken — this triggers a full sync that returns
+ * every active task.  Subsequent calls with the returned token receive only
+ * incremental deltas, keeping API usage minimal.
+ *
+ * @param {string} syncToken  Previous sync token, or '*' for a full sync
+ * @returns {Promise<string>}  New sync token to use on the next call
+ */
+async function pollTodoist(syncToken) {
+  console.log(
+    `[todoistPoll] Checking Todoist for changes (full_sync=${syncToken === '*'})...`
+  );
+
+  let response;
+  try {
+    response = await axios.post(
+      'https://api.todoist.com/sync/v9/sync',
+      { sync_token: syncToken, resource_types: ['items'] },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+  } catch (err) {
+    console.error(
+      `[todoistPoll] Sync API request failed: ${err.response?.status ?? err.message}. ` +
+        'Will retry next cycle.'
+    );
+    return syncToken;
+  }
+
+  const { items = [], sync_token: newSyncToken, full_sync } = response.data;
+  console.log(`[todoistPoll] Received ${items.length} changed item(s)`);
+
+  for (const item of items) {
+    const todoistId = String(item.id);
+
+    // Skip items that were recently written by our own Notion→Todoist sync
+    // to prevent an echo loop.
+    if (store.isDebounced(todoistId)) {
+      console.log(`[todoistPoll] Skipping debounced item id=${todoistId}`);
+      continue;
+    }
+
+    const existing = store.getByTodoistId(todoistId);
+
+    // ── Deleted ──────────────────────────────────────────────────────────────
+    if (item.is_deleted) {
+      if (existing) {
+        console.log(
+          `[todoistPoll] Task deleted id=${todoistId} → archiving Notion page id=${existing.notion_id}`
+        );
+        await archiveNotionPage(existing.notion_id);
+        store.markSynced(todoistId, 'todoist');
+      }
+      continue;
+    }
+
+    // Normalise the Sync API item shape to match what the REST API returns so
+    // fieldMap and notionSync helpers work without modification.
+    const isCompleted = item.checked === true || item.checked === 1;
+    const task = { ...item, is_completed: isCompleted };
+
+    // ── Completed ─────────────────────────────────────────────────────────────
+    if (isCompleted) {
+      if (existing) {
+        if (item.due?.is_recurring) {
+          // Recurring task: the due date has advanced — update Notion page
+          // rather than marking it done.
+          console.log(
+            `[todoistPoll] Recurring task completed id=${todoistId} → updating Notion due date`
+          );
+          await updateNotionPage(existing.notion_id, task);
+        } else {
+          console.log(
+            `[todoistPoll] Task completed id=${todoistId} → marking Notion page done`
+          );
+          await markNotionDone(existing.notion_id);
+        }
+        store.markSynced(todoistId, 'todoist');
+      }
+      // Don't create new Notion pages for tasks that are already completed.
+      continue;
+    }
+
+    // ── Active (new or updated) ───────────────────────────────────────────────
+    try {
+      if (existing) {
+        console.log(
+          `[todoistPoll] Updating Notion page id=${existing.notion_id} for task id=${todoistId}`
+        );
+        await updateNotionPage(existing.notion_id, task);
+        store.markSynced(todoistId, 'todoist');
+      } else {
+        console.log(
+          `[todoistPoll] New task id=${todoistId} "${item.content}" → creating Notion page`
+        );
+        await createNotionPage(task);
+      }
+    } catch (err) {
+      console.error(
+        `[todoistPoll] Failed to sync task id=${todoistId}:`,
+        err.response?.data ?? err.message
+      );
+    }
+  }
+
+  return newSyncToken;
+}
+
 module.exports = {
   createNotionPage,
   updateNotionPage,
   archiveNotionPage,
   markNotionDone,
   pollNotion,
+  pollTodoist,
 };

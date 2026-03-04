@@ -138,6 +138,20 @@ function createSqliteStore() {
       const row = stmtGetPoll.get('last_notion_poll');
       return row ? row.value : null;
     },
+
+    /**
+     * Persist the Todoist Sync API token so incremental syncs survive restarts.
+     * Pass '*' to reset to a full sync on next poll.
+     */
+    setTodoistSyncToken(token) {
+      stmtSetPoll.run('todoist_sync_token', token);
+    },
+
+    /** @returns {string | null} Last Todoist sync token, or null if never set */
+    getTodoistSyncToken() {
+      const row = stmtGetPoll.get('todoist_sync_token');
+      return row ? row.value : null;
+    },
   };
 }
 
@@ -232,6 +246,17 @@ function createJsonStore() {
     getLastPollTime() {
       const data = loadJson();
       return data.poll.last_notion_poll || null;
+    },
+
+    setTodoistSyncToken(token) {
+      const data = loadJson();
+      data.poll.todoist_sync_token = token;
+      saveJson(data);
+    },
+
+    getTodoistSyncToken() {
+      const data = loadJson();
+      return data.poll.todoist_sync_token || null;
     },
   };
 }

@@ -18,6 +18,10 @@ Before running the service, create a Notion database with **exactly** these prop
 | `Due` | Date | Due date |
 | `Priority` | Select | Options: `P1`, `P2`, `P3`, `P4` |
 | `Done` | Checkbox | Completion state |
+| `Labels` | Multi-select | Todoist labels/tags — options are created automatically |
+| `Project` | Select | Todoist project name — read-only from Todoist |
+| `Recurring` | Checkbox | True when the task repeats on a schedule |
+| `Recurrence` | Rich Text | Recurrence pattern string, e.g. `every day`, `every Mon` |
 | `TodoistID` | Rich Text | Hidden — stores the Todoist task ID for reverse lookup |
 
 Then share the database with your Notion integration (click ··· → Connections on the database page).
@@ -188,13 +192,17 @@ todoist_id TEXT, notion_id TEXT, last_synced_at INTEGER, origin TEXT
 
 ## Field Mapping
 
-| Notion Property | Todoist Field | Notes |
-|---|---|---|
-| `Name` (title) | `content` | Direct string |
-| `Due` (date) | `due_date` | ISO 8601 date |
-| `Priority` (select) | `priority` | P1↔4, P2↔3, P3↔2, P4↔1 (inverted) |
-| `Done` (checkbox) | completed state | Boolean |
-| `TodoistID` (rich text) | task `id` | Written by service, not the user |
+| Notion Property | Todoist Field | Direction | Notes |
+|---|---|---|---|
+| `Name` (title) | `content` | Both | Direct string |
+| `Due` (date) | `due_date` | Both | ISO 8601 date |
+| `Priority` (select) | `priority` | Both | P1↔4, P2↔3, P3↔2, P4↔1 (inverted) |
+| `Done` (checkbox) | completed state | Both | Boolean |
+| `Labels` (multi-select) | `labels` | Both | Label names synced as-is |
+| `Project` (select) | project name | Todoist → Notion | Read-only; set by Todoist webhook/import |
+| `Recurring` (checkbox) | `due.is_recurring` | Todoist → Notion | Set automatically |
+| `Recurrence` (rich text) | `due.string` / `due_string` | Both | Edit this field in Notion to change/set a recurrence pattern in Todoist |
+| `TodoistID` (rich text) | task `id` | Internal | Written by service, not the user |
 
 ---
 

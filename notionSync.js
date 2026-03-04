@@ -4,6 +4,7 @@ const { Client } = require('@notionhq/client');
 const store = require('./store');
 const { notionPageToTodoistTask, todoistTaskToNotionProps } = require('./fieldMap');
 const todoistSync = require('./todoistSync');
+const projectCache = require('./projectCache');
 
 // Client is created lazily so that the env var is always read at call time,
 // and so that a bad key produces a clear error at the first API call rather
@@ -33,7 +34,8 @@ function dbId() {
 async function createNotionPage(task) {
   console.log(`[notionSync] Creating page for todoist task id=${task.id} "${task.content}"`);
 
-  const properties = todoistTaskToNotionProps(task, task.id);
+  const projectName = await projectCache.getProjectName(task.project_id);
+  const properties = todoistTaskToNotionProps(task, task.id, projectName);
 
   const page = await notion().pages.create({
     parent: { database_id: dbId() },
@@ -58,7 +60,8 @@ async function createNotionPage(task) {
 async function updateNotionPage(notionId, task) {
   console.log(`[notionSync] Updating page id=${notionId} from todoist_id=${task.id}`);
 
-  const properties = todoistTaskToNotionProps(task, task.id);
+  const projectName = await projectCache.getProjectName(task.project_id);
+  const properties = todoistTaskToNotionProps(task, task.id, projectName);
 
   const page = await notion().pages.update({
     page_id: notionId,

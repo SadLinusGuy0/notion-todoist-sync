@@ -175,6 +175,19 @@ async function handleTodoistEvent(eventName, task) {
           );
           return;
         }
+
+        // Recurring tasks are never truly "done" — completing one occurrence
+        // advances the due date to the next.  Todoist will fire item:updated
+        // immediately after with the new due date, which will update Notion.
+        // Marking the page done here would incorrectly close it.
+        if (task.due?.is_recurring) {
+          console.log(
+            `[webhook] item:completed for recurring task id=${todoistId} — ` +
+              'skipping done mark; item:updated will follow with the next due date'
+          );
+          break;
+        }
+
         console.log(
           `[webhook] item:completed → marking Notion page done id=${record.notion_id}`
         );

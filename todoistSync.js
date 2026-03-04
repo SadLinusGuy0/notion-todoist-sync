@@ -20,16 +20,27 @@ function getHeaders() {
  * Build the subset of Todoist task fields that the REST API accepts on
  * create/update from a normalised task-fields object.
  *
- * @param {{ content, due_date?, priority }} fields
+ * @param {{ content, due_date?, priority, labels?, recurrence_string? }} fields
  */
 function buildTaskPayload(fields) {
   const payload = {
     content: fields.content,
     priority: fields.priority ?? 1,
   };
-  if (fields.due_date) {
+
+  // Labels are an array of label-name strings in the Todoist API
+  if (Array.isArray(fields.labels) && fields.labels.length > 0) {
+    payload.labels = fields.labels;
+  }
+
+  // Prefer due_string when a recurrence pattern is present — this preserves
+  // the recurring schedule in Todoist.  Fall back to a plain due_date.
+  if (fields.recurrence_string) {
+    payload.due_string = fields.recurrence_string;
+  } else if (fields.due_date) {
     payload.due_date = fields.due_date;
   }
+
   return payload;
 }
 

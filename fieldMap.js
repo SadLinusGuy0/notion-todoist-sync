@@ -38,7 +38,9 @@ const NOTION_TO_TODOIST_PRIORITY = {
  *   due_date?: string,
  *   priority: number,
  *   is_done: boolean,
- *   todoist_id?: string
+ *   todoist_id?: string,
+ *   labels: string[],
+ *   recurrence_string?: string
  * }}
  */
 function notionPageToTodoistTask(page) {
@@ -62,7 +64,16 @@ function notionPageToTodoistTask(page) {
   const todoist_id_parts = props?.TodoistID?.rich_text ?? [];
   const todoist_id = todoist_id_parts.map((t) => t.plain_text).join('') || undefined;
 
-  return { content, due_date, priority, is_done, todoist_id };
+  // Labels / tags — multi-select option names map directly to Todoist label strings
+  const labels = (props?.Labels?.multi_select ?? []).map((opt) => opt.name);
+
+  // Recurrence string (e.g. "every day", "every week on Monday")
+  // When present, this is passed to Todoist as due_string so the recurrence
+  // is preserved on create/update.
+  const recurrenceParts = props?.Recurrence?.rich_text ?? [];
+  const recurrence_string = recurrenceParts.map((t) => t.plain_text).join('') || undefined;
+
+  return { content, due_date, priority, is_done, todoist_id, labels, recurrence_string };
 }
 
 // ---------------------------------------------------------------------------
@@ -70,15 +81,16 @@ function notionPageToTodoistTask(page) {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a Notion `properties` payload from a Todoist task object (as returned
- * by the Todoist REST API v2).
+ * Build a Notion `properties` payload from a Todoist task object.
  *
- * @param {object} task  Raw Todoist task object
+ * @param {object} task         Raw Todoist task object (REST API v1)
  * @param {string} [todoistId]  Explicit task ID to store in TodoistID property
+ * @param {string|null} [projectName]  Resolved project display name
  * @returns {object}  Notion properties object
  */
-function todoistTaskToNotionProps(task, todoistId) {
+function todoistTaskToNotionProps(task, todoistId, projectName) {
   const id = todoistId ?? task.id;
+  const isRecurring = task.due?.is_recurring ?? false;
 
   const props = {
     Name: {
@@ -105,9 +117,30 @@ function todoistTaskToNotionProps(task, todoistId) {
         },
       ],
     },
+    // Labels: array of label name strings in Todoist → multi-select options in Notion
+    Labels: {
+      multi_select: (task.labels ?? []).map((name) => ({ name })),
+    },
+    // Recurring checkbox
+    Recurring: {
+      checkbox: isRecurring,
+    },
+    // Human-readable recurrence pattern (e.g. "every day") — blank when not recurring
+    Recurrence: {
+      rich_text: isRecurring && task.due?.string
+        ? [{ type: 'text', text: { content: task.due.string } }]
+        : [],
+    },
   };
 
-  // Only set Due if a due date is present — avoid overwriting with null
+  // Project select — only set when a name was resolved; avoids overwriting with null
+  if (projectName) {
+    props.Project = {
+      select: { name: projectName },
+    };
+  }
+
+  // Due date — only set when present to avoid clearing an existing date
   const dueDate = task.due?.date ?? task.due_date ?? null;
   if (dueDate) {
     props.Due = {

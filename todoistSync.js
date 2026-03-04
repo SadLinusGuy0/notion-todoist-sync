@@ -3,7 +3,7 @@
 const axios = require('axios');
 const store = require('./store');
 
-const BASE_URL = 'https://api.todoist.com/rest/v2';
+const BASE_URL = 'https://api.todoist.com/api/v1';
 
 function getHeaders() {
   return {

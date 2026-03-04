@@ -254,7 +254,7 @@ async function importFromTodoist() {
   let tasks;
   try {
     const axios = require('axios');
-    const response = await axios.get('https://api.todoist.com/rest/v2/tasks', {
+    const response = await axios.get('https://api.todoist.com/api/v1/tasks', {
       headers: { Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}` },
     });
     tasks = response.data;
